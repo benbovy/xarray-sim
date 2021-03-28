@@ -120,10 +120,6 @@ Visualize models as graphs
     dot_graph(advect_model, show_inputs=True, filename='savefig/advect_model_inputs.png')
     dot_graph(advect_model, show_inputs=True, show_variables=True,
               filename='savefig/advect_model_variables.png')
-
-.. ipython:: python
-   :suppress:
-
     dot_graph(advect_model, show_only_variable=('profile', 'u'),
               filename='savefig/advect_model_var_u.png')
 

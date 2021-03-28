@@ -148,6 +148,36 @@ class TestModelBuilder:
             # order of dependencies is not ensured
             assert set(actual[p_name]) == set(expected[p_name])
 
+    def test_get_process_dependencies_custom(self, model):
+        @xs.process
+        class A:
+            pass
+
+        @xs.process
+        class B:
+            pass
+
+        @xs.process
+        class C:
+            pass
+
+        actual = xs.Model(
+            {"a": A, "b": B}, custom_dependencies={"a": "b"}
+        ).dependent_processes
+        expected = {"a": ["b"], "b": []}
+
+        for p_name in expected:
+            assert set(actual[p_name]) == set(expected[p_name])
+
+        # also test with a list
+        actual = xs.Model(
+            {"a": A, "b": B, "c": C}, custom_dependencies={"a": ["b", "c"]}
+        ).dependent_processes
+        expected = {"a": ["b", "c"], "b": [], "c": []}
+
+        for p_name in expected:
+            assert set(actual[p_name]) == set(expected[p_name])
+
     @pytest.mark.parametrize(
         "p_name,dep_p_name",
         [
@@ -174,6 +204,135 @@ class TestModelBuilder:
 
         with pytest.raises(RuntimeError, match=r"Cycle detected.*"):
             xs.Model({"foo": Foo, "bar": Bar})
+
+    def test_strict_check(self):
+        # also give the variable different names
+        @xs.process
+        class Inout1:
+            v = xs.variable(intent="inout")
+
+        @xs.process
+        class Inout2:
+            va = xs.foreign(Inout1, "v", intent="inout")
+
+        @xs.process
+        class Inout3:
+            var = xs.foreign(Inout1, "v", intent="inout")
+
+        @xs.process
+        class In1:
+            var = xs.foreign(Inout1, "v")
+
+        # io # equivalent to # io-..-io
+        # in #               #  in              #where any io can be in in deps
+        with pytest.raises(RuntimeError, match="some input processes do not"):
+            xs.Model({"io1": Inout1, "in1": In1}, strict_order_check=True)
+        # io-in #eq. to io-..-io-in
+        xs.Model(
+            {"io1": Inout1, "in1": In1},
+            strict_order_check=True,
+            custom_dependencies={"in1": "io1"},
+        )
+        # in-io #eq to in-io-..-io
+        xs.Model(
+            {"io1": Inout1, "in1": In1},
+            strict_order_check=True,
+            custom_dependencies={"io1": "in1"},
+        )
+        # io
+        # io
+        with pytest.raises(RuntimeError, match="has two branch dependencies"):
+            xs.Model({"io1": Inout1, "io2": Inout2}, strict_order_check=True)
+        # io-io
+        xs.Model(
+            {"io1": Inout1, "io2": Inout2},
+            custom_dependencies={"io2": "io1"},
+            strict_order_check=True,
+        )
+        # io-io
+        #    /
+        #  in
+        with pytest.raises(RuntimeError, match="io2 updates it and depends"):
+            xs.Model(
+                {"io1": Inout1, "io2": Inout2, "in1": In1},
+                custom_dependencies={"io2": ["io1", "in1"]},
+                strict_order_check=True,
+            )
+        # io io
+        # \ /
+        # in
+        xs.Model(
+            {"io1": Inout1, "io2": Inout2, "in1": In1},
+            custom_dependencies={"io2": "in1", "in1": "io1"},
+        )
+
+        # the following is a bit arbitrary which raises: 2 or 3 based on the ordering of dicts
+        # io2-io1
+        #     /
+        #  io3   This raises in first tree traversal: should be equivalent to
+        with pytest.raises(RuntimeError, match="has two branch dependencies"):
+            xs.Model(
+                {"io1": Inout1, "io2": Inout2, "io3": Inout3},
+                custom_dependencies={"io1": ["io2", "io3"]},
+                strict_order_check=True,
+            )
+
+        # io-io
+        #  \
+        #  io
+        with pytest.raises(RuntimeError, match="order of inout process"):
+            xs.Model(
+                {"io1": Inout1, "io2": Inout2, "io3": Inout3},
+                custom_dependencies={"io1": "io2", "io3": "io2"},
+                strict_order_check=True,
+            )
+
+    def test_strict_check_multiple_vars_in_process(self):
+        # in|->|io|->|in|->|io| - foo variable
+        #   |  |in|->|io|->|in| - bar variable
+        @xs.process
+        class Out:
+            foo = xs.on_demand()
+            bar = xs.variable(intent="out")
+
+            @foo.compute
+            def method(self):
+                pass
+
+        @xs.process
+        class FooInBarInout:
+            foo = xs.foreign(Out, "foo")
+            bar = xs.foreign(Out, "bar", intent="inout")
+
+        @xs.process
+        class FooInoutBarIn:
+            foo = xs.foreign(Out, "foo")
+            bar = xs.foreign(Out, "bar", intent="inout")
+
+        @xs.process
+        class FooIn:
+            foo = xs.foreign(Out, "foo")
+
+        @xs.process
+        class BarInFooInout:
+            bar = xs.foreign(Out, "bar")
+            foo = xs.foreign(Out, "foo", intent="inout")
+
+        xs.Model(
+            {
+                "out": Out,
+                "foo_in_bar_inout": FooInBarInout,
+                "foo_inout_bar_in": FooInoutBarIn,
+                "foo_in": FooIn,
+                "boo_in_foo_inout": BarInFooInout,
+            },
+            custom_dependencies={
+                "boo_in_foo_inout": "foo_in_bar_inout",
+                "foo_in_bar_inout": "foo_inout_bar_in",
+                "foo_inout_bar_in": "foo_in",
+            },
+            strict_order_check=True,
+        )
 
     def test_process_inheritance(self, model):
         @xs.process
@@ -293,6 +452,30 @@ class TestModel:
     def test_drop_processes(self, no_init_model, simple_model, p_names):
         m = no_init_model.drop_processes(p_names)
         assert m == simple_model
+
+    def test_drop_processes_custom(self):
+        @xs.process
+        class A:
+            pass
+
+        @xs.process
+        class B:
+            pass
+
+        @xs.process
+        class C:
+            pass
+
+        @xs.process
+        class D:
+            pass
+
+        model = xs.Model(
+            {"a": A, "b": B, "c": C, "d": D},
+            custom_dependencies={"d": "c", "c": "b", "b": "a"},
+        )
+        model = model.drop_processes(["b", "c"])
+        assert model.dependent_processes["d"] == ["a"]
 
     def test_visualize(self, model):
         pytest.importorskip("graphviz")

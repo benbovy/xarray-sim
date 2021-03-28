@@ -12,7 +12,9 @@ Part of the code below is copied and modified from:
 import os
 from functools import partial
 
-from .utils import variables_dict, import_required, maybe_to_list
+from .utils import variables_dict, import_required, maybe_to_list, has_method
+
+from .process import SimulationStage
 from .variable import VarIntent, VarType
 
 
@@ -43,6 +45,10 @@ INPUT_NODE_ATTRS = {
 INPUT_EDGE_ATTRS = {"arrowhead": "none", "color": "#b49434"}
 VAR_NODE_ATTRS = {"shape": "box", "color": "#555555", "fontcolor": "#555555"}
 VAR_EDGE_ATTRS = {"arrowhead": "none", "color": "#555555"}
+
+FEEDBACK_EDGE_ATTRS = {"style": "dashed", "width": "200"}
+IN_EDGE_ATTRS = {"color": "#2ca02c", "style": "bold"}
+INOUT_EDGE_ATTRS = {"color": "#d62728", "style": "bold"}
 
 
 def _hash_variable(var):
@@ -136,6 +142,89 @@ class _GraphBuilder:
                 ):
                     self._add_var(var, p_name)
 
+    def add_feedback_arrows(self):
+        """
+        adds dotted arrows from the last inout processes to all processes that
+        use it in the next timestep before it is changed.
+        """
+        # in->inout1->inout2
+        # ^            /
+        #  \- - - - - /
+        feedback_edge_attrs = FEEDBACK_EDGE_ATTRS.copy()
+
+        in_vars = {}
+        inout_vars = {}
+        for p_name, p_obj in self.model._processes.items():
+            p_cls = type(p_obj)
+            if not has_method(p_obj, SimulationStage.RUN_STEP.value) and not has_method(
+                p_obj, SimulationStage.FINALIZE_STEP.value
+            ):
+                continue
+            for var_name, var in variables_dict(p_cls).items():
+                target_keys = tuple(_get_target_keys(p_obj, var_name))
+                if var.metadata["intent"] == VarIntent.OUT:
+                    in_vars[target_keys] = {p_name}
+                    # also put a placeholder in inout_vars so we do not add
+                    # anymore in processes
+                    inout_vars[target_keys] = None
+                if (
+                    var.metadata["intent"] == VarIntent.IN
+                    and not target_keys in inout_vars  # only in->inout vars
+                ):
+                    in_vars.setdefault(target_keys, set()).add(p_name)
+                if var.metadata["intent"] == VarIntent.INOUT:
+                    inout_vars[target_keys] = p_name
+
+        for target_keys, io_p in inout_vars.items():
+            # skip this if there are no inout processes
+            if io_p is None:
+                continue
+            for in_p in in_vars[target_keys]:
+                self.g.edge(io_p, in_p, **feedback_edge_attrs)
+
+    def add_stages_arrows(self, p_name, var_name):
+        """
+        adds red arrows between inout processes and green arrows between in and
+        inout processes of the same variable.
+        """
+        #    green         red
+        # /---------\  /-----------\     red        green
+        # in->other->inout->other->inout------>inout------->in
+        # ^           \            ^           /
+        #  \     green \--->in----/ green     /
+        #   \- - - - - - - - - - - - - - - - /
+        in_edge_attrs = IN_EDGE_ATTRS.copy()
+        inout_edge_attrs = INOUT_EDGE_ATTRS.copy()
+        feedback_edge_attrs = FEEDBACK_EDGE_ATTRS.copy()
+
+        this_p_name = p_name
+        this_var_name = var_name
+
+        this_p_obj = self.model._processes[this_p_name]
+        this_target_keys = _get_target_keys(this_p_obj, this_var_name)
+
+        in_vars = [set()]
+        inout_vars = []
+        for p_name, p_obj in self.model._processes.items():
+            p_cls = type(p_obj)
+            for var_name, var in variables_dict(p_cls).items():
+                if this_target_keys != _get_target_keys(p_obj, var_name):
+                    continue
+                if var.metadata["intent"] == VarIntent.IN:
+                    in_vars[-1].add(p_name)
+                elif var.metadata["intent"] == VarIntent.INOUT:
+                    # add an edge from inout var to inout var
+                    if inout_vars:
+                        self.g.edge(inout_vars[-1], p_name, **inout_edge_attrs)
+                    inout_vars.append(p_name)
+                    in_vars.append(set())
+
+        for i in range(len(inout_vars)):
+            for var_p_name in in_vars[i]:
+                self.g.edge(var_p_name, inout_vars[i], **in_edge_attrs)
+            for var_p_name in in_vars[i + 1]:
+                self.g.edge(inout_vars[i], var_p_name, **in_edge_attrs)
+
     def get_graph(self):
         return self.g
 
@@ -144,8 +233,10 @@ def to_graphviz(
     model,
     rankdir="LR",
     show_only_variable=None,
+    show_variable_stages=None,
     show_inputs=False,
     show_variables=False,
+    show_feedbacks=True,
     graph_attr={},
     **kwargs,
 ):
@@ -161,11 +252,18 @@ def to_graphviz(
         p_name, var_name = show_only_variable
         builder.add_var_and_targets(p_name, var_name)
 
+    elif show_variable_stages is not None:
+        p_name, var_name = show_variable_stages
+        builder.add_stages_arrows(p_name, var_name)
+
     elif show_variables:
         builder.add_variables()
 
     elif show_inputs:
         builder.add_inputs()
+
+    elif show_feedbacks:
+        builder.add_feedback_arrows()
 
     return builder.get_graph()
 
@@ -209,8 +307,10 @@ def dot_graph(
     filename=None,
     format=None,
     show_only_variable=None,
+    show_variable_stages=None,
     show_inputs=False,
     show_variables=False,
+    show_feedbacks=True,
     **kwargs,
 ):
     """
@@ -236,6 +336,10 @@ def dot_graph(
     show_variables : bool, optional
         If True, show also the other variables (default: False).
         Ignored if `show_only_variable` is not None.
+    show_feedbacks: bool, optional
+        if True, draws dotted arrows to indicate what processes use updated
+        variables in the next timestep. (default: True)
+        Ignored if `show_variables` is not None
     **kwargs
         Additional keyword arguments to forward to `to_graphviz`.
 
@@ -260,8 +364,10 @@ def dot_graph(
     g = to_graphviz(
         model,
         show_only_variable=show_only_variable,
+        show_variable_stages=show_variable_stages,
         show_inputs=show_inputs,
         show_variables=show_variables,
+        show_feedbacks=show_feedbacks,
         **kwargs,
     )
 

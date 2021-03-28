@@ -104,9 +104,6 @@ def test_any_object():
 
 
 def test_foreign():
-    with pytest.raises(ValueError, match="intent='inout' is not supported.*"):
-        xs.foreign(ExampleProcess, "some_var", intent="inout")
-
     var = attr.fields(ExampleProcess).out_foreign_var
     ref_var = attr.fields(AnotherProcess).another_var
 

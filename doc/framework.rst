@@ -272,11 +272,22 @@ in their computation.
 
 In a model, the processes and their dependencies together form the
 nodes and the edges of a Directed Acyclic Graph (DAG). The graph
-topology is fully determined by the ``intent`` set for each variable
-or foreign variable declared in each process. An ordering that is
-computationally consistent can then be obtained using topological
-sorting. This is done at Model object creation. The same ordering is
-used at every stage of a model run.
+topology is automatically determined by the ``intent`` set for each variable
+or foreign variable declared in each process. A process ``A`` depends on another
+process ``B`` (``A->B``) if and only if ``B`` has a variable with 
+``intent='out'``, that is used in process ``A`` (``in`` or ``inout`` intent).
+For processes that update a variable (``inout``), no automatic sorting is done, 
+which can mean that no definite order can be established. In this case, the user
+has to add custom dependencies, but a checking system is provided, see Section
+:ref:`create_model_strict`. 
+
+To determine the ordering from dependencies, a depth-first search is applied.
+The graph is traverset, starting from a random process, until a process is found
+that has no dependencies of itself. This is added as the first process to
+execute, after which processes that depend on it can be added. Unless, they have
+other dependencies, then those are traversed and added first. That way, an 
+ordering that is computationally consistent can be obtained. This is done at
+Model object creation.
 
 The DAG structure also allows running the processes in parallel at every stage
 of a model run, see Section :ref:`run_parallel_single`.

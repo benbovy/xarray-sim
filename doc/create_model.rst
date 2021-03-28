@@ -352,3 +352,264 @@ to the ``grid`` process in the updated model:
 
    - a third process in the same model has a foreign variable that
      links to that common class
+
+Process ordering and dependencies
+---------------------------------
+The execution order is uniquely determined based on process ordering, which is
+derived from the intent of variables in different processes. However, this
+ordering is only based on variables that have ``out`` intent. For processes that
+update a variable, (``inout`` intent), the order is not automatically
+established, and this has to be done using custom dependencies. For example, the
+order in the following model is automatically determined:
+
+.. ipython:: python
+   :suppress:
+
+   import sys
+   sys.path.append('scripts')
+   from xsimlab.dot import dot_graph
+   from process_ordering import *
+
+.. literalinclude:: scripts/process_ordering.py
+   :lines: 4-7,14-16
+
+.. ipython:: python
+
+   model = xs.Model({'out':Out1,'inout':Inout1})
+
+.. ipython:: python
+   :suppress:
+
+   dot_graph(model,filename='savefig/ordering_out_inout.png')
+
+.. image:: savefig/ordering_out_inout.png
+
+The order would have been the same when `inout` had had ``intent=in``
+for ``var``. Here, the ``out`` variable is always calculated first. Both processes
+can change the value for ``var``. However, the ``out`` process will only use the
+calculated value from ``inout`` in the next timestep. In this way, feedback
+loops can be implemented in xarray-simlab.
+
+**More on ordering**
+
+For a complete understanding of in which order processes are executed, take the
+following example:
+
+.. ipython:: python
+   :suppress:
+
+   model=xs.Model({'A':Other,'B':In2,'C':Inout1,'D':In3,'E':In1,'F':Inout2},
+                  custom_dependencies={'F':{'D','E'},'E':{'C','A'},'D':'C','C':'B'})
+   dot_graph(model,filename='savefig/ordering_complex.png')
+   model=xs.Model({'A':Other,'B':In2,'C':Inout1,'D':In3,'E':In1,'F':Inout2},
+                  custom_dependencies={'F':{'D','E'},'E':'C','D':'C','C':{'B','A'}})
+   dot_graph(model,filename='savefig/ordering_simple.png')
+
+.. image:: savefig/ordering_simple.png
+
+Here, processes ``A`` and ``B`` are executed first. When both are finished,
+``C`` can be executed, after which ``D`` and ``E`` can be executed. Finally,
+when both are finished, ``F`` is executed. The mutual order of ``A`` and ``B``,
+or ``D`` and ``E`` depends on how the graph is traversed, and cannot be
+established beforehand.
+
+Establishing an order can become even more complex, as in the following example:
+
+.. image:: savefig/ordering_complex.png
+
+Here, ``A`` can be calculated before or after ``B``, ``C``, or even ``D``, 
+depending on how the graph is traversed. In the case of parallel processing, all
+processes that can be calculated simultaneously are calculated simultaneously 
+by Dask.
+
+.. note::
+   The order described above is executed on every runtime stage, so separately
+   for :func:`initialize`, :func:`run_step`, :func:`finalize_step` (to be
+   deprecated) and :func:`finalize`.
+   
+
+Custom dependencies
+~~~~~~~~~~~~~~~~~~~
+It may be necessary to add custom dependencies to a model. For example, when a
+process that updates a variable (``inout``) is used by another process (``in``
+or ``inout``), but there is no ordering determined in the model based on other
+variables. 
+
+.. literalinclude:: scripts/process_ordering.py
+   :lines: 4-11
+
+.. ipython:: python
+
+   model = xs.Model({'inout':Inout1,'in':In1})
+
+.. ipython:: python
+   :suppress:
+
+   dot_graph(model, filename='savefig/ordering_in_inout_noedge.png')
+
+.. image:: savefig/ordering_in_inout_noedge.png
+
+Now, there is no way to determine whether ``in`` uses the variable
+``var`` before or after ``inout`` has modified it. In this case, the user can 
+add custom dependencies:
+
+.. ipython:: python
+
+   model= xs.Model({'inout':Inout1,'in':In1},custom_dependencies={'inout':'in'})
+
+.. ipython:: python
+   :suppress:
+
+   dot_graph(model, filename='savefig/ordering_in_inout.png')
+
+.. image:: savefig/ordering_in_inout.png
+
+Of course, this could also have been done the other way around, if ``in`` should
+use the updated value of ``inout``.
+
+It is also possible to provide a list of dependent processes as follows:
+
+.. ipython:: python
+
+   xs.Model({'inout':Inout1,'in1':In1,'in2':In2},
+             custom_dependencies={'inout':['in1','in2']})
+
+Internally, this is converted to a Python ``set``
+
+**Dropping processes**
+
+When dropping processes, *custom* dependencies of dropped processes are
+automatically added to processes that explicitly depend on them. This also works
+for longer chains of dropped processes and branched dependencies:
+
+.. ipython:: python
+
+   model = xs.Model({'in1':In1,'inout1':Inout1,'inout2':Inout2},
+                     custom_dependencies={'in1':'inout2','inout2':'inout1'})
+   model_dropped = model.drop_processes('inout2')
+
+.. ipython:: python
+   :suppress:
+
+   dot_graph(model,filename='savefig/ordering_drop_notyet.png')
+   dot_graph(model_dropped,filename='savefig/ordering_drop_processes.png')
+
+.. image:: savefig/ordering_drop_notyet.png
+
+becomes:
+
+.. image:: savefig/ordering_drop_processes.png
+
+.. _create_model_strict:
+
+Strict checking
+~~~~~~~~~~~~~~~
+In a model with many different processes and even more variables, the 
+abovementioned integrity may not be easy to verify. Therefore, a strict checking
+algorithm has been provided. It both checks if all processes that update a
+variable (``inout``) are in a linear order, and all processes that use it
+(``in``) are strictly in between two ``inout`` processes.
+
+It can be enabled at model creation as:
+
+.. ipython:: python
+
+   xs.Model({'in':In1,'inout':Inout1},
+            custom_dependencies={'in':'inout'},
+            strict_order_check=True)
+
+and raises an error whenever a strict order cannot be determined. When multiple 
+processes update a variable, they should be in a linear order. 
+Furthermore, all processes that use that variable (``in``) should either be
+before all ``inout`` processes, strictly in between two ``inout`` processes, or
+after the last ``inout`` process. Additional interdependencies are also allowed.
+
+**Checking processes that update a variable**
+
+.. ipython:: python
+   :suppress:
+
+   model = xs.Model({'inout1':Inout1,'inout2':Inout2,'inout3':Inout3},
+                    custom_dependencies={'inout2':'inout1','inout3':'inout1'},
+                    strict_order_check=False)
+   dot_graph(model,filename='savefig/strict_io_branch.png')
+      model = xs.Model({'inout1':Inout1,'inout2':Inout2,'inout3':Inout3},
+                    custom_dependencies={'inout3':{'inout1','inout2'}},
+                    strict_order_check=False)
+   dot_graph(model,filename='savefig/strict_branch_io.png')
+
+.. image:: savefig/strict_branch_io.png
+
+Here, the algorithm will find that either ``inout1`` or ``inout2`` does not have
+dependent processes that update the variable, while another such process has
+already been traversed. This can be solved by adding ``inout1->inout2`` or
+``inout2->inout1`` to custom dependencies.
+
+.. image:: savefig/strict_io_branch.png
+
+Here, it will find that either ``inout2`` or ``inout3`` has ``inout1`` as *only*
+dependent ``inout`` process for this variable, while both others have already
+been traversed. Adding ``inout2->inout3`` or ``inout3->inout2`` solves this.
+
+**Checking processes that use the variable**
+
+When an ``in`` variable is to be used in between two processes that update it,
+it should both depend on the first ``inout`` process, and the second ``inout``
+process should also depend on it:
+
+.. ipython:: python
+
+   model = xs.Model({'inout1':Inout1,'inout2':Inout2,'in1':In1},
+                     custom_dependencies={'inout2':['in1','inout1'],'in1':'inout1'})
+
+.. ipython:: python
+   :suppress:
+   
+   dot_graph(model, filename='savefig/strict_io_in_io.png')
+
+.. image:: savefig/strict_io_in_io.png
+
+Note that the ``'inout2':'inout1'`` dependency is actually redundant, since it
+derives from ``'inout2':'in1'`` and ``'in1':'inout1'``.
+
+.. ipython:: python
+   :suppress:
+
+   model = xs.Model({'inout1':Inout1,'inout2':Inout2,'in1':In1},
+                    custom_dependencies={'inout2':{'inout1','in1'}})
+   dot_graph(model,filename='savefig/strict_ioinio_branch.png')
+   model = xs.Model({'inout1':Inout1,'inout2':Inout2,'in1':In1},
+                    custom_dependencies={'inout2':'inout1','in1':'inout1'})
+   dot_graph(model,filename='savefig/strict_branch_ioinio.png')
+
+.. image:: savefig/strict_ioinio_branch.png
+
+Here, ``inout2`` will be found to depend on ``in1``, but ``in1`` not on
+``inout1``. ``in1`` can still be placed either before ``inout1->in1`` or after
+``in1->inout1``.
+
+.. image:: savefig/strict_branch_ioinio.png
+
+Now, in the final check, it is found that ``in1`` does not depend on ``inout2``.
+It can still be placed before ``in1->inout2`` or after ``inout2->in1``.
+
+A full correct example with multiple redundant edges can be:
+
+.. ipython:: python
+   :suppress:
+
+   model = xs.Model({'in1':In1,'other':Other,'inout1':Inout1,'in2':In2,'inout2':Inout2,'in3':In3},
+                    custom_dependencies={
+                                         'in3':['inout2','in2',
+                                         'inout1','in1'],
+                                         'inout2':['in2','in1'],
+                                         'in2':['inout1','in1'],
+                                         'inout1':'other',
+                                         'other':'in1'})
+   dot_graph(model, filename='savefig/strict_mayhem.png')
+   
+.. image:: savefig/strict_mayhem.png
+
+Note that there is still a strict order that can be determined. Also, the
+``other`` process makes that ``inout1`` does not directly depend on ``in1``.
+This is fine, however, since ``in1`` is still executed first.

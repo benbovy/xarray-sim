@@ -445,9 +445,6 @@ def foreign(other_process_cls, var_name, intent="in"):
     model.
 
     """
-    if intent == "inout":
-        raise ValueError("intent='inout' is not supported for foreign variables")
-
     ref_var = attr.fields_dict(other_process_cls)[var_name]
 
     metadata = {

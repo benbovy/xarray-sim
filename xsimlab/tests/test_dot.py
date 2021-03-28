@@ -16,7 +16,7 @@ except ImportError:
 
 from xsimlab.dot import to_graphviz, dot_graph, _hash_variable
 from xsimlab.utils import variables_dict
-
+import xsimlab as xs
 
 # need to parse elements of graphivz's Graph object
 g_node_label_re = re.compile(r'.*\[label=([\w<>\\"]*?)\s+.*\]')
@@ -55,7 +55,7 @@ def _ensure_not_exists(filename):
 
 
 def test_to_graphviz(model):
-    g = to_graphviz(model)
+    g = to_graphviz(model, show_feedbacks=False)
     actual_nodes = _get_graph_nodes(g)
     actual_edges = _get_graph_edges(g)
     expected_nodes = list(model)
@@ -92,6 +92,139 @@ def test_to_graphviz(model):
 def test_to_graphviz_attributes(model):
     assert to_graphviz(model).graph_attr["rankdir"] == "LR"
     assert to_graphviz(model, rankdir="BT").graph_attr["rankdir"] == "BT"
+
+
+# create processes for feedback edges test -> also for show_stages
+@xs.process
+class In1:
+    v = xs.variable()
+
+    def run_step(self):
+        pass
+
+
+@xs.process
+class In2:
+    v = xs.foreign(In1, "v")
+
+    def finalize_step(self):
+        pass
+
+
+@xs.process
+class In3:
+    v = xs.foreign(In1, "v")
+
+    def run_step(self):
+        pass
+
+
+@xs.process
+class InNot:
+
+    v = xs.foreign(In1, "v")
+
+
+@xs.process
+class Inout1:
+    v = xs.foreign(In1, "v", intent="inout")
+
+    def run_step(self):
+        pass
+
+
+@xs.process
+class Inout2:
+    v = xs.foreign(In1, "v", intent="inout")
+
+    def finalize_step(self):
+        pass
+
+
+@xs.process
+class Out1:
+    v = xs.foreign(In1, "v", intent="out")
+
+    def run_step(self):
+        pass
+
+
+def test_feedback_edges():
+    #  /< - - - - - - \<-test
+    # in1->io1->in3->io2
+    # in_not/         /
+    #    in2< - - - -/<-test
+
+    model = xs.Model(
+        {
+            "in1": In1,
+            "in2": In2,
+            "in_not": InNot,
+            "in3": In3,
+            "io1": Inout1,
+            "io2": Inout2,
+        },
+        custom_dependencies={
+            "io2": "in3",
+            "in3": "io1",
+            "io1": {"in2", "in1", "in_not"},
+        },
+    )
+    g = to_graphviz(model)
+    actual_edges = _get_graph_edges(g)
+    expected_edges = [
+        (dep_p_name, p_name)
+        for p_name, p_deps in model.dependent_processes.items()
+        for dep_p_name in p_deps
+    ] + [("io2", "in1"), ("io2", "in2")]
+    assert set(actual_edges) == set(expected_edges)
+
+    # /<- - - - - - - - \
+    # out-in1->io1->in3->io2
+    #   in_not/
+    #      in2
+
+    model = xs.Model(
+        {
+            "out1": Out1,
+            "in1": In1,
+            "in2": In2,
+            "in3": In3,
+            "io1": Inout1,
+            "io2": Inout2,
+        },
+        custom_dependencies={"io2": "in3", "in3": "io1", "io1": {"in2", "in1"}},
+    )
+    g = to_graphviz(model)
+    actual_edges = _get_graph_edges(g)
+    expected_edges = [
+        (dep_p_name, p_name)
+        for p_name, p_deps in model.dependent_processes.items()
+        for dep_p_name in p_deps
+    ] + [("io2", "out1")]
+    assert set(actual_edges) == set(expected_edges)
+
+
+def test_show_stages():
+    # we don't need to add custom dependencies,
+    # with only in and inout processes, no edges are added and processes are
+    # added in the order they are declared in the  model.
+    #             r
+    # in1->inout1->inout2->in3
+    #     g    g\   /g    g
+    #            in2
+    model = xs.Model(
+        {"in1": In1, "inout1": Inout1, "in2": In2, "inout2": Inout2, "in3": In3},
+        strict_order_check=False,
+    )
+    g = to_graphviz(model, show_variable_stages=("in1", "v"))
+    expected_edges = [
+        ("inout1", "inout2"),
+        ("in1", "inout1"),
+        ("inout1", "in2"),
+        ("in2", "inout2"),
+        ("inout2", "in3"),
+    ]
 
 
 @pytest.mark.skipif(not ipython_installed, reason="IPython is not installed")

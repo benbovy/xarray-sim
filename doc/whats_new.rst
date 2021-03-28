@@ -15,6 +15,9 @@ v0.6.0 (Unreleased)
    This will be set to the main clock when storing the dataset.
  - Changed default ``fill_value`` in the zarr stores to maximum dtype value 
    for integer dtypes and ``np.nan`` for floating-point variables.
+ - Added custom dependencies as option at model creation e.g. 
+   ``xs.Model({"a":A,"b":B},custom_dependencies={"a":"b"})
+ - Added strict order checking and :func:``xs.foreign(intent='inout)``.
 
 v0.5.0 (26 January 2021)
 ------------------------
